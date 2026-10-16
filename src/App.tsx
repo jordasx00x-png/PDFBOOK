@@ -1,8 +1,9 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { PDFDocument, rgb } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
-import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle } from 'lucide-react';
+import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle, User as UserIcon, LogOut, FolderOpen, Cloud, Bookmark } from 'lucide-react';
+import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, db, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, User } from './firebase';
 
 // @ts-ignore
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -62,7 +63,6 @@ async function normalizeImageToBytes(file: File): Promise<{ bytes: Uint8Array; t
       const img = new window.Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        // 4K UHD Ultra-HD resolution limit (3840px) for professional print-ready export quality
         const MAX_DIM = 3840;
         let w = img.width;
         let h = img.height;
@@ -98,7 +98,7 @@ async function normalizeImageToBytes(file: File): Promise<{ bytes: Uint8Array; t
               type: isPng ? 'png' : 'jpg'
             });
           });
-        }, mimeType, 0.98); // 98% quality for pristine 4K print output
+        }, mimeType, 0.98);
       };
       img.onerror = reject;
       img.src = e.target?.result as string;
@@ -109,6 +109,11 @@ async function normalizeImageToBytes(file: File): Promise<{ bytes: Uint8Array; t
 }
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [savedFiles, setSavedFiles] = useState<any[]>([]);
+  const [isSavedFilesOpen, setIsSavedFilesOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
   const [appMode, setAppMode] = useState<'pdf' | 'album'>('pdf');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
@@ -132,6 +137,112 @@ export default function App() {
   const [albumImages, setAlbumImages] = useState<{ file: File; previewUrl: string; name: string }[]>([]);
   const [albumOrientation, setAlbumOrientation] = useState<'portrait' | 'landscape'>('portrait');
   const [albumPhotosPerPage, setAlbumPhotosPerPage] = useState<1 | 2>(1);
+
+  // Auth observer & fetch saved files
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        await fetchSavedFiles(currentUser.uid);
+      } else {
+        setSavedFiles([]);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const fetchSavedFiles = async (uid: string) => {
+    try {
+      const q = query(collection(db, `users/${uid}/files`), orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+      const files = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+      setSavedFiles(files);
+    } catch (err) {
+      console.error("Error al obtener archivos guardados:", err);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.error("Error al iniciar sesión con Google:", err);
+      alert("No se pudo iniciar sesión con Google.");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error("Error al cerrar sesión:", err);
+    }
+  };
+
+  const saveFileToCloud = async (name: string, mode: string, imgs: string[], pdfBytes?: Uint8Array) => {
+    if (!user) return;
+    setIsSaving(true);
+    try {
+      let pdfBase64 = '';
+      if (pdfBytes) {
+        // Convert Uint8Array to base64 safely in chunks if needed
+        let binary = '';
+        const len = pdfBytes.byteLength;
+        for (let i = 0; i < len; i++) {
+          binary += String.fromCharCode(pdfBytes[i]);
+        }
+        pdfBase64 = btoa(binary);
+      }
+
+      // Store metadata and up to first 10 page preview images to stay under Firestore doc size limit
+      const payload = {
+        userId: user.uid,
+        name: name || 'Documento sin título',
+        appMode: mode,
+        createdAt: new Date().toISOString(),
+        pageCount: imgs.length,
+        pageImagesPreview: imgs.slice(0, 10), // preview thumbnails
+        pdfBase64: pdfBase64.length < 900000 ? pdfBase64 : '' // store if under ~900KB
+      };
+
+      await addDoc(collection(db, `users/${user.uid}/files`), payload);
+      await fetchSavedFiles(user.uid);
+    } catch (err) {
+      console.error("Error al guardar archivo en la nube:", err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const deleteCloudFile = async (fileId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!user) return;
+    if (!confirm("¿Estás seguro de eliminar este archivo guardado?")) return;
+    try {
+      await deleteDoc(doc(db, `users/${user.uid}/files`, fileId));
+      await fetchSavedFiles(user.uid);
+    } catch (err) {
+      console.error("Error al eliminar archivo:", err);
+    }
+  };
+
+  const loadCloudFile = (fileItem: any) => {
+    setFileName(fileItem.name);
+    setAppMode(fileItem.appMode || 'pdf');
+    if (fileItem.pageImagesPreview && fileItem.pageImagesPreview.length > 0) {
+      setPageImages(fileItem.pageImagesPreview);
+    }
+    if (fileItem.pdfBase64) {
+      const binaryString = atob(fileItem.pdfBase64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      setProcessedBytes(bytes);
+    }
+    setIsSavedFilesOpen(false);
+  };
 
   const processPdf = async (file: File, marginValue: number, layout: '1up' | '2up' | 'booklet', fill: 'fit' | 'stretch', drawSeparator: boolean, bindingMm: number, doubleSided: boolean, removeBlanks: boolean) => {
     setIsProcessing(true);
@@ -200,126 +311,189 @@ export default function App() {
           
           newPdf.addPage(page);
         }
-      } else {
-        const SHEET_WIDTH = 792;
-        const SHEET_HEIGHT = 612;
-        const HALF_WIDTH = SHEET_WIDTH / 2;
+      } else if (layout === '2up') {
+        const LETTER_WIDTH = 792;
+        const LETTER_HEIGHT = 612;
         const MARGIN = marginValue * 72;
-        const bindingMarginPoints = bindingMm * (72 / 25.4);
-        const innerHeight = SHEET_HEIGHT - MARGIN * 2;
-        const adjustedInnerWidth = HALF_WIDTH - MARGIN * 2 - bindingMarginPoints;
 
-        const embeddedPages = await newPdf.embedPdf(pdfDoc, pageIndices);
-        
-        let pagesForLayout: (any | null)[] = [...embeddedPages];
-        
-        if (layout === 'booklet') {
-          const bookletPages = [];
-          const N = pagesForLayout.length;
-          for (let i = 0; i < N / 2; i++) {
-            if (i % 2 === 0) {
-              bookletPages.push(pagesForLayout[N - 1 - i]);
-              bookletPages.push(pagesForLayout[i]);
-            } else {
-              bookletPages.push(pagesForLayout[i]);
-              bookletPages.push(pagesForLayout[N - 1 - i]);
-            }
-          }
-          pagesForLayout = bookletPages;
-        }
+        const availableWidth = LETTER_WIDTH - MARGIN * 2;
+        const availableHeight = LETTER_HEIGHT - MARGIN * 2;
+        const halfWidth = availableWidth / 2;
 
-        for (let i = 0; i < pagesForLayout.length; i += 2) {
-          const newPage = newPdf.addPage([SHEET_WIDTH, SHEET_HEIGHT]);
+        const copiedPages = await newPdf.copyPages(pdfDoc, pageIndices);
+
+        for (let i = 0; i < copiedPages.length; i += 2) {
+          const newPage = newPdf.addPage([LETTER_WIDTH, LETTER_HEIGHT]);
           
-          const leftPage = pagesForLayout[i];
+          const leftPage = copiedPages[i];
+          const rightPage = copiedPages[i + 1];
+
           if (leftPage) {
-            let scaleXLeft = adjustedInnerWidth / leftPage.width;
-            let scaleYLeft = innerHeight / leftPage.height;
-            
+            const { width, height } = leftPage.getSize();
+            let scaleX = halfWidth / width;
+            let scaleY = availableHeight / height;
             if (fill === 'fit') {
-              const minScaleL = Math.min(scaleXLeft, scaleYLeft);
-              scaleXLeft = minScaleL;
-              scaleYLeft = minScaleL;
+              const minScale = Math.min(scaleX, scaleY);
+              scaleX = minScale;
+              scaleY = minScale;
             }
+            const sW = width * scaleX;
+            const sH = height * scaleY;
+            const xOff = MARGIN + (halfWidth - sW) / 2;
+            const yOff = MARGIN + (availableHeight - sH) / 2;
+
+            leftPage.scaleContent(scaleX, scaleY);
+            leftPage.translateContent(xOff, yOff);
             
-            const scaledWidthLeft = leftPage.width * scaleXLeft;
-            const scaledHeightLeft = leftPage.height * scaleYLeft;
-            
-            const xLeft = MARGIN + (adjustedInnerWidth - scaledWidthLeft) / 2;
-            const yLeft = MARGIN + (innerHeight - scaledHeightLeft) / 2;
-            
-            newPage.drawPage(leftPage, {
-              x: xLeft,
-              y: yLeft,
-              width: scaledWidthLeft,
-              height: scaledHeightLeft,
-            });
+            const embeddedLeft = await newPdf.embedPage(leftPage);
+            newPage.drawPage(embeddedLeft);
           }
 
-          const rightPage = pagesForLayout[i + 1];
           if (rightPage) {
-            let scaleXRight = adjustedInnerWidth / rightPage.width;
-            let scaleYRight = innerHeight / rightPage.height;
-            
+            const { width, height } = rightPage.getSize();
+            let scaleX = halfWidth / width;
+            let scaleY = availableHeight / height;
             if (fill === 'fit') {
-              const minScaleR = Math.min(scaleXRight, scaleYRight);
-              scaleXRight = minScaleR;
-              scaleYRight = minScaleR;
+              const minScale = Math.min(scaleX, scaleY);
+              scaleX = minScale;
+              scaleY = minScale;
             }
+            const sW = width * scaleX;
+            const sH = height * scaleY;
+            const xOff = MARGIN + halfWidth + (halfWidth - sW) / 2;
+            const yOff = MARGIN + (availableHeight - sH) / 2;
+
+            rightPage.scaleContent(scaleX, scaleY);
+            rightPage.translateContent(xOff, yOff);
             
-            const scaledWidthRight = rightPage.width * scaleXRight;
-            const scaledHeightRight = rightPage.height * scaleYRight;
-            
-            const xRight = HALF_WIDTH + MARGIN + bindingMarginPoints + (adjustedInnerWidth - scaledWidthRight) / 2;
-            const yRight = MARGIN + (innerHeight - scaledHeightRight) / 2;
-            
-            newPage.drawPage(rightPage, {
-              x: xRight,
-              y: yRight,
-              width: scaledWidthRight,
-              height: scaledHeightRight,
-            });
+            const embeddedRight = await newPdf.embedPage(rightPage);
+            newPage.drawPage(embeddedRight);
           }
 
           if (drawSeparator) {
             newPage.drawLine({
-              start: { x: HALF_WIDTH, y: 0 },
-              end: { x: HALF_WIDTH, y: SHEET_HEIGHT },
-              thickness: 1,
-              color: rgb(0, 0, 0),
-              opacity: 0.5,
+              start: { x: LETTER_WIDTH / 2, y: MARGIN },
+              end: { x: LETTER_WIDTH / 2, y: LETTER_HEIGHT - MARGIN },
+              thickness: 0.75,
+              color: rgb(0.8, 0.8, 0.8),
+            });
+          }
+        }
+      } else if (layout === 'booklet') {
+        const LETTER_WIDTH = 792;
+        const LETTER_HEIGHT = 612;
+        const MARGIN = marginValue * 72;
+
+        const availableWidth = LETTER_WIDTH - MARGIN * 2;
+        const availableHeight = LETTER_HEIGHT - MARGIN * 2;
+        const halfWidth = availableWidth / 2;
+
+        const copiedPages = await newPdf.copyPages(pdfDoc, pageIndices);
+        
+        while (copiedPages.length % 4 !== 0) {
+          const blankPage = newPdf.addPage([612, 792]);
+          copiedPages.push(blankPage);
+        }
+
+        const totalP = copiedPages.length;
+        const sheetPairs: [number, number][] = [];
+        
+        for (let s = 0; s < totalP / 2; s++) {
+          if (s % 2 === 0) {
+            sheetPairs.push([totalP - 1 - s, s]);
+          } else {
+            sheetPairs.push([s, totalP - 1 - s]);
+          }
+        }
+
+        for (const [leftIdx, rightIdx] of sheetPairs) {
+          const newPage = newPdf.addPage([LETTER_WIDTH, LETTER_HEIGHT]);
+          
+          const leftP = copiedPages[leftIdx];
+          const rightP = copiedPages[rightIdx];
+
+          if (leftP) {
+            const { width, height } = leftP.getSize();
+            let scaleX = halfWidth / width;
+            let scaleY = availableHeight / height;
+            if (fill === 'fit') {
+              const minScale = Math.min(scaleX, scaleY);
+              scaleX = minScale;
+              scaleY = minScale;
+            }
+            const sW = width * scaleX;
+            const sH = height * scaleY;
+            const xOff = MARGIN + (halfWidth - sW) / 2;
+            const yOff = MARGIN + (availableHeight - sH) / 2;
+
+            leftP.scaleContent(scaleX, scaleY);
+            leftP.translateContent(xOff, yOff);
+            const embeddedLeft = await newPdf.embedPage(leftP);
+            newPage.drawPage(embeddedLeft);
+          }
+
+          if (rightP) {
+            const { width, height } = rightP.getSize();
+            let scaleX = halfWidth / width;
+            let scaleY = availableHeight / height;
+            if (fill === 'fit') {
+              const minScale = Math.min(scaleX, scaleY);
+              scaleX = minScale;
+              scaleY = minScale;
+            }
+            const sW = width * scaleX;
+            const sH = height * scaleY;
+            const xOff = MARGIN + halfWidth + (halfWidth - sW) / 2;
+            const yOff = MARGIN + (availableHeight - sH) / 2;
+
+            rightP.scaleContent(scaleX, scaleY);
+            rightP.translateContent(xOff, yOff);
+            const embeddedRight = await newPdf.embedPage(rightP);
+            newPage.drawPage(embeddedRight);
+          }
+
+          if (drawSeparator) {
+            newPage.drawLine({
+              start: { x: LETTER_WIDTH / 2, y: MARGIN },
+              end: { x: LETTER_WIDTH / 2, y: LETTER_HEIGHT - MARGIN },
+              thickness: 0.75,
+              color: rgb(0.8, 0.8, 0.8),
             });
           }
         }
       }
 
-      const newPdfBytes = await newPdf.save();
-      const bytesForExport = new Uint8Array(newPdfBytes);
-      setProcessedBytes(bytesForExport);
+      const pdfBytes = await newPdf.save();
+      setProcessedBytes(pdfBytes);
 
-      const loadingTask = pdfjsLib.getDocument({ data: newPdfBytes });
-      const loadedPdf = await loadingTask.promise;
-
+      setProcessingStatus("Generando previsualización 4K UHD...");
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.buffer.slice(0) });
+      const renderedDoc = await loadingTask.promise;
       const images: string[] = [];
-      for (let i = 1; i <= loadedPdf.numPages; i++) {
-        const page = await loadedPdf.getPage(i);
-        const viewport = page.getViewport({ scale: 2 }); // High-res 2x preview
-        
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) continue;
-        
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
 
-        await page.render({ canvasContext: context, canvas, viewport } as any).promise;
-        images.push(canvas.toDataURL('image/png'));
+      for (let i = 1; i <= renderedDoc.numPages; i++) {
+        const page = await renderedDoc.getPage(i);
+        const viewport = page.getViewport({ scale: 2.0 }); // 2.0 scale for pristine 4K display crispness
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, canvas, viewport } as any).promise;
+          images.push(canvas.toDataURL('image/jpeg', 0.95));
+        }
       }
 
       setPageImages(images);
+      
+      if (user) {
+        await saveFileToCloud(file.name, 'pdf', images, pdfBytes);
+      }
     } catch (err) {
-      console.error("Error processing PDF:", err);
-      alert("Hubo un error al procesar el documento. Verifica que sea un PDF válido.");
+      console.error("Error al procesar PDF:", err);
+      alert("Hubo un error al procesar el archivo PDF.");
     } finally {
       setIsProcessing(false);
       setProcessingStatus('');
@@ -330,155 +504,160 @@ export default function App() {
     imagesList: { file: File; previewUrl: string; name: string }[],
     orientation: 'portrait' | 'landscape',
     photosPerPage: 1 | 2,
-    marginValue: number
+    marginVal: number
   ) => {
     if (imagesList.length === 0) return;
     setIsProcessing(true);
-    setFileName("Album_XV_Anos_4K.pdf");
+    setProcessingStatus("Generando Álbum de XV Años en 4K Ultra Print...");
+    setFileName("Album_XV_Anos.pdf");
+
     try {
       const newPdf = await PDFDocument.create();
-      const MARGIN = marginValue * 72;
+      
+      const isLandscape = orientation === 'landscape' || photosPerPage === 2;
+      const PAGE_W = isLandscape ? 792 : 612;
+      const PAGE_H = isLandscape ? 612 : 792;
+      const MARGIN = marginVal * 72;
+
+      const availW = PAGE_W - MARGIN * 2;
+      const availH = PAGE_H - MARGIN * 2;
 
       if (photosPerPage === 1) {
-        const LETTER_W = orientation === 'portrait' ? 612 : 792;
-        const LETTER_H = orientation === 'portrait' ? 792 : 612;
-        const innerW = LETTER_W - MARGIN * 2;
-        const innerH = LETTER_H - MARGIN * 2;
-
         for (let i = 0; i < imagesList.length; i++) {
-          setProcessingStatus(`Procesando foto 4K ${i + 1} de ${imagesList.length} (Proporción exacta)...`);
-          await new Promise(r => setTimeout(r, 4)); // Yield to keep UI smooth with 50+ photos
+          const imgItem = imagesList[i];
+          const { bytes, type } = await normalizeImageToBytes(imgItem.file);
+          const embeddedImage = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+          
+          const page = newPdf.addPage([PAGE_W, PAGE_H]);
+          const imgDims = embeddedImage.scale(1);
+          
+          let scaleX = availW / imgDims.width;
+          let scaleY = availH / imgDims.height;
+          const minScale = Math.min(scaleX, scaleY);
+          
+          const sW = imgDims.width * minScale;
+          const sH = imgDims.height * minScale;
+          const xOff = MARGIN + (availW - sW) / 2;
+          const yOff = MARGIN + (availH - sH) / 2;
 
-          const item = imagesList[i];
-          const { bytes, type } = await normalizeImageToBytes(item.file);
-          const embeddedImg = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-          
-          const imgAspect = embeddedImg.width / embeddedImg.height;
-          
-          let targetW = innerW;
-          let targetH = innerW / imgAspect;
-          
-          if (targetH > innerH) {
-            targetH = innerH;
-            targetW = innerH * imgAspect;
-          }
-          
-          const page = newPdf.addPage([LETTER_W, LETTER_H]);
-          page.drawRectangle({
-            x: 0,
-            y: 0,
-            width: LETTER_W,
-            height: LETTER_H,
-            color: rgb(1, 1, 1),
-          });
-
-          const x = MARGIN + (innerW - targetW) / 2;
-          const y = MARGIN + (innerH - targetH) / 2;
-          
-          page.drawImage(embeddedImg, {
-            x,
-            y,
-            width: targetW,
-            height: targetH,
+          page.drawImage(embeddedImage, {
+            x: xOff,
+            y: yOff,
+            width: sW,
+            height: sH,
           });
         }
       } else {
-        const SHEET_W = 792;
-        const SHEET_H = 612;
-        const HALF_W = SHEET_W / 2;
-        const innerWidth2 = HALF_W - MARGIN * 1.5;
-        const innerHeight2 = SHEET_H - MARGIN * 2;
-
+        // 2 photos per page
         for (let i = 0; i < imagesList.length; i += 2) {
-          setProcessingStatus(`Procesando pliego 4K ${Math.floor(i / 2) + 1} de ${Math.ceil(imagesList.length / 2)}...`);
-          await new Promise(r => setTimeout(r, 4));
+          const page = newPdf.addPage([PAGE_W, PAGE_H]);
+          const halfW = availW / 2;
 
-          const page = newPdf.addPage([SHEET_W, SHEET_H]);
-          page.drawRectangle({ x: 0, y: 0, width: SHEET_W, height: SHEET_H, color: rgb(1, 1, 1) });
+          // Photo 1 (Left)
+          const imgItem1 = imagesList[i];
+          if (imgItem1) {
+            const { bytes, type } = await normalizeImageToBytes(imgItem1.file);
+            const embeddedImage1 = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+            const dims1 = embeddedImage1.scale(1);
+            
+            let scX = (halfW - 10) / dims1.width;
+            let scY = availH / dims1.height;
+            let mSc = Math.min(scX, scY);
+            let sW = dims1.width * mSc;
+            let sH = dims1.height * mSc;
+            let xOff = MARGIN + (halfW - sW) / 2;
+            let yOff = MARGIN + (availH - sH) / 2;
 
-          const leftItem = imagesList[i];
-          if (leftItem) {
-            const { bytes, type } = await normalizeImageToBytes(leftItem.file);
-            const embeddedImg = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-            const imgAspect = embeddedImg.width / embeddedImg.height;
-
-            let targetW = innerWidth2;
-            let targetH = innerWidth2 / imgAspect;
-            if (targetH > innerHeight2) {
-              targetH = innerHeight2;
-              targetW = innerHeight2 * imgAspect;
-            }
-            const x = MARGIN + (innerWidth2 - targetW) / 2;
-            const y = MARGIN + (innerHeight2 - targetH) / 2;
-
-            page.drawImage(embeddedImg, { x, y, width: targetW, height: targetH });
+            page.drawImage(embeddedImage1, {
+              x: xOff,
+              y: yOff,
+              width: sW,
+              height: sH,
+            });
           }
 
-          const rightItem = imagesList[i + 1];
-          if (rightItem) {
-            const { bytes, type } = await normalizeImageToBytes(rightItem.file);
-            const embeddedImg = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-            const imgAspect = embeddedImg.width / embeddedImg.height;
+          // Photo 2 (Right)
+          const imgItem2 = imagesList[i + 1];
+          if (imgItem2) {
+            const { bytes, type } = await normalizeImageToBytes(imgItem2.file);
+            const embeddedImage2 = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+            const dims2 = embeddedImage2.scale(1);
+            
+            let scX = (halfW - 10) / dims2.width;
+            let scY = availH / dims2.height;
+            let mSc = Math.min(scX, scY);
+            let sW = dims2.width * mSc;
+            let sH = dims2.height * mSc;
+            let xOff = MARGIN + halfW + 10 + (halfW - sW) / 2;
+            let yOff = MARGIN + (availH - sH) / 2;
 
-            let targetW = innerWidth2;
-            let targetH = innerWidth2 / imgAspect;
-            if (targetH > innerHeight2) {
-              targetH = innerHeight2;
-              targetW = innerHeight2 * imgAspect;
-            }
-            const x = HALF_W + (HALF_W - innerWidth2) / 2 + (innerWidth2 - targetW) / 2;
-            const y = MARGIN + (innerHeight2 - targetH) / 2;
-
-            page.drawImage(embeddedImg, { x, y, width: targetW, height: targetH });
+            page.drawImage(embeddedImage2, {
+              x: xOff,
+              y: yOff,
+              width: sW,
+              height: sH,
+            });
           }
+
+          page.drawLine({
+            start: { x: PAGE_W / 2, y: MARGIN },
+            end: { x: PAGE_W / 2, y: PAGE_H - MARGIN },
+            thickness: 0.5,
+            color: rgb(0.8, 0.8, 0.8),
+          });
         }
       }
 
-      setProcessingStatus("Generando vista previa optimizada en alta definición...");
-      await new Promise(r => setTimeout(r, 10));
+      const pdfBytes = await newPdf.save();
+      setProcessedBytes(pdfBytes);
 
-      const newPdfBytes = await newPdf.save();
-      const bytesForExport = new Uint8Array(newPdfBytes);
-      setProcessedBytes(bytesForExport);
-
-      const loadingTask = pdfjsLib.getDocument({ data: newPdfBytes });
-      const loadedPdf = await loadingTask.promise;
-
+      setProcessingStatus("Generando previsualización 4K del álbum...");
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.buffer.slice(0) });
+      const renderedDoc = await loadingTask.promise;
       const images: string[] = [];
-      const previewScale = loadedPdf.numPages > 25 ? 1.5 : 2;
-      for (let i = 1; i <= loadedPdf.numPages; i++) {
-        if (i % 10 === 0) {
-          setProcessingStatus(`Renderizando vista previa (${i}/${loadedPdf.numPages})...`);
-          await new Promise(r => setTimeout(r, 2));
-        }
-        const page = await loadedPdf.getPage(i);
-        const viewport = page.getViewport({ scale: previewScale });
+
+      for (let i = 1; i <= renderedDoc.numPages; i++) {
+        const page = await renderedDoc.getPage(i);
+        const viewport = page.getViewport({ scale: 2.0 });
         const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) continue;
-        canvas.height = viewport.height;
         canvas.width = viewport.width;
-        await page.render({ canvasContext: context, canvas, viewport } as any).promise;
-        images.push(canvas.toDataURL('image/png'));
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, canvas, viewport } as any).promise;
+          images.push(canvas.toDataURL('image/jpeg', 0.95));
+        }
       }
+
       setPageImages(images);
+
+      if (user) {
+        await saveFileToCloud("Álbum de XV Años 4K", 'album', images, pdfBytes);
+      }
     } catch (err) {
-      console.error("Error creating album PDF:", err);
-      alert("Hubo un error al generar el álbum de fotos.");
+      console.error("Error al generar álbum:", err);
+      alert("Hubo un error al generar el álbum de XV Años.");
     } finally {
       setIsProcessing(false);
       setProcessingStatus('');
     }
   };
 
-  const onDropPdf = useCallback((acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
-      processPdf(acceptedFiles[0], marginInches, layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
+  const { getRootProps: getPdfRootProps, getInputProps: getPdfInputProps, isDragActive: isPdfDragActive } = useDropzone({
+    accept: { 'application/pdf': ['.pdf'] },
+    maxFiles: 1,
+    onDrop: (acceptedFiles) => {
+      if (acceptedFiles.length > 0) {
+        processPdf(acceptedFiles[0] as File, marginInches, layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
+      }
     }
-  }, [marginInches, layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages]);
+  } as any);
 
-  const onDropAlbumImages = useCallback((acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
+  const { getRootProps: getAlbumRootProps, getInputProps: getAlbumInputProps, isDragActive: isAlbumDragActive } = useDropzone({
+    accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] },
+    onDrop: (acceptedFiles) => {
       const newItems = acceptedFiles.map(file => ({
         file,
         previewUrl: URL.createObjectURL(file),
@@ -486,18 +665,6 @@ export default function App() {
       }));
       setAlbumImages(prev => [...prev, ...newItems]);
     }
-  }, []);
-
-  const { getRootProps: getPdfRootProps, getInputProps: getPdfInputProps, isDragActive: isPdfDragActive } = useDropzone({
-    onDrop: onDropPdf,
-    accept: { 'application/pdf': ['.pdf'] },
-    multiple: false
-  } as any);
-
-  const { getRootProps: getAlbumRootProps, getInputProps: getAlbumInputProps, isDragActive: isAlbumDragActive } = useDropzone({
-    onDrop: onDropAlbumImages,
-    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp'] },
-    multiple: true
   } as any);
 
   const removeAlbumImage = (index: number) => {
@@ -584,6 +751,53 @@ export default function App() {
         </div>
         
         <div className="flex items-center gap-3">
+          {/* Google Auth & Saved Files */}
+          {user ? (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsSavedFilesOpen(true)}
+                className="px-3 py-1.5 text-xs font-medium bg-zinc-100 border border-zinc-200 rounded-md hover:bg-zinc-200 flex items-center gap-1.5 transition-colors"
+                title="Mis archivos guardados en la nube"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-zinc-600" />
+                <span className="hidden sm:inline">Archivos Anteriores</span>
+                <span className="bg-black text-white text-[10px] px-1.5 py-0.2 rounded-full font-bold ml-0.5">
+                  {savedFiles.length}
+                </span>
+              </button>
+
+              <div className="flex items-center gap-2 pl-2 border-l border-zinc-200">
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || 'Usuario'} className="w-7 h-7 rounded-full border border-zinc-300" />
+                ) : (
+                  <div className="w-7 h-7 bg-zinc-200 rounded-full flex items-center justify-center text-xs font-bold">
+                    {user.email?.[0].toUpperCase()}
+                  </div>
+                )}
+                <button
+                  onClick={handleLogout}
+                  className="p-1.5 text-zinc-500 hover:text-red-600 rounded hover:bg-zinc-100 transition-colors"
+                  title="Cerrar sesión"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={handleGoogleLogin}
+              className="px-4 py-1.5 text-xs font-semibold text-white bg-black hover:bg-zinc-800 rounded-md flex items-center gap-2 shadow-xs transition-all"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+              </svg>
+              Iniciar sesión con Google
+            </button>
+          )}
+
           {pageImages.length > 0 && (
              <button
               onClick={resetState}
@@ -611,6 +825,79 @@ export default function App() {
           </button>
         </div>
       </nav>
+
+      {/* Saved Files Modal / Drawer */}
+      {isSavedFilesOpen && (
+        <div className="no-print fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full max-h-[80vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Cloud className="w-5 h-5 text-zinc-900" />
+                <h2 className="text-base font-bold text-zinc-900">Mis Archivos Anteriores en la Nube</h2>
+              </div>
+              <button 
+                onClick={() => setIsSavedFilesOpen(false)}
+                className="text-zinc-400 hover:text-zinc-700 text-sm font-bold px-2 py-1 rounded"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-3">
+              {savedFiles.length === 0 ? (
+                <div className="text-center py-12 text-zinc-400">
+                  <FolderOpen className="w-12 h-12 mx-auto mb-3 opacity-40" />
+                  <p className="text-sm font-medium">No tienes archivos guardados todavía.</p>
+                  <p className="text-xs text-zinc-400 mt-1">Los documentos y álbumes que proceses se guardarán automáticamente al iniciar sesión.</p>
+                </div>
+              ) : (
+                savedFiles.map((file) => (
+                  <div 
+                    key={file.id}
+                    onClick={() => loadCloudFile(file)}
+                    className="p-4 rounded-xl border border-zinc-200 hover:border-black bg-zinc-50 hover:bg-white transition-all cursor-pointer flex items-center justify-between group"
+                  >
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-10 h-10 bg-white border border-zinc-200 rounded-lg flex items-center justify-center text-zinc-700 shadow-xs">
+                        {file.appMode === 'album' ? <Sparkles className="w-5 h-5 text-pink-600" /> : <FileText className="w-5 h-5 text-zinc-800" />}
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-semibold text-zinc-900 group-hover:underline">{file.name}</h4>
+                        <div className="flex items-center gap-2 mt-0.5 text-xs text-zinc-500">
+                          <span className="uppercase text-[10px] bg-zinc-200 text-zinc-700 px-1.5 py-0.5 rounded font-mono">{file.appMode || 'pdf'}</span>
+                          <span>•</span>
+                          <span>{file.pageCount || 0} páginas</span>
+                          <span>•</span>
+                          <span>{new Date(file.createdAt).toLocaleDateString()}</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={(e) => deleteCloudFile(file.id, e)}
+                        className="p-2 text-zinc-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                        title="Eliminar archivo"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            
+            <div className="px-6 py-3 border-t border-zinc-200 bg-zinc-50 text-right">
+              <button
+                onClick={() => setIsSavedFilesOpen(false)}
+                className="px-4 py-2 bg-black text-white text-xs font-semibold rounded-lg hover:bg-zinc-800 transition-colors"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 flex overflow-hidden print:overflow-visible print:block">
         {/* Sidebar Configuration */}
@@ -648,305 +935,207 @@ export default function App() {
                       <p className="text-[11px] text-zinc-400 mb-3">{layoutMode === '1up' ? '8.5 x 11 in (Portrait)' : '11 x 8.5 in (Landscape)'}</p>
                       
                       <div className="flex gap-2">
-                        <button 
-                          onClick={() => {
-                            setLayoutMode('1up');
-                            setViewMode('book');
-                            if (currentFile) processPdf(currentFile, marginInches, '1up', fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                          }}
-                          className={`flex-1 py-1.5 px-1 text-[10px] font-medium rounded border transition-all ${layoutMode === '1up' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                        <button
+                          onClick={() => setLayoutMode('1up')}
+                          className={`flex-1 py-1.5 text-xs font-medium rounded border transition-all ${layoutMode === '1up' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100'}`}
                         >
-                          1 Pág / Hoja
+                          1 Página / Hoja
                         </button>
-                        <button 
-                          onClick={() => {
-                            setLayoutMode('2up');
-                            setViewMode('single');
-                            if (currentFile) processPdf(currentFile, marginInches, '2up', fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                          }}
-                          className={`flex-1 py-1.5 px-1 text-[10px] font-medium rounded border transition-all ${layoutMode === '2up' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                        <button
+                          onClick={() => setLayoutMode('2up')}
+                          className={`flex-1 py-1.5 text-xs font-medium rounded border transition-all ${layoutMode === '2up' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100'}`}
                         >
-                          2 Pág (Normal)
+                          2 Páginas / Hoja
                         </button>
-                        <button 
-                          onClick={() => {
-                            setLayoutMode('booklet');
-                            setViewMode('single');
-                            if (currentFile) processPdf(currentFile, marginInches, 'booklet', fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                          }}
-                          className={`flex-1 py-1.5 px-1 text-[10px] font-medium rounded border transition-all ${layoutMode === 'booklet' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                      </div>
+
+                      <div className="mt-2">
+                        <button
+                          onClick={() => setLayoutMode('booklet')}
+                          className={`w-full py-1.5 text-xs font-medium rounded border transition-all ${layoutMode === 'booklet' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100'}`}
                         >
-                          Folleto (Libro)
+                          📖 Modo Cuadernillo (Imposición)
                         </button>
                       </div>
                     </div>
-                    {(layoutMode === '2up' || layoutMode === 'booklet') && (
-                      <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50 mb-4">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-zinc-600">Línea divisoria</span>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input 
-                              type="checkbox" 
-                              className="sr-only peer" 
-                              checked={showSeparatorLine}
-                              onChange={(e) => {
-                                setShowSeparatorLine(e.target.checked);
-                                if (currentFile) processPdf(currentFile, marginInches, layoutMode, fillMode, e.target.checked, bindingMarginMm, isDoubleSided, removeBlankPages);
-                              }}
-                            />
-                            <div className="w-7 h-4 bg-zinc-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-zinc-900"></div>
-                          </label>
-                        </div>
-                        <p className="text-[10px] text-zinc-400 mt-1">Línea negra para corte/plegado</p>
+
+                    <div>
+                      <label className="text-xs font-medium text-zinc-700 block mb-1.5">Margen de Página ({marginInches} in)</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1.5"
+                        step="0.1"
+                        value={marginInches}
+                        onChange={(e) => setMarginInches(parseFloat(e.target.value))}
+                        className="w-full accent-black cursor-pointer"
+                      />
+                    </div>
+
+                    {layoutMode === '1up' && (
+                      <div>
+                        <label className="text-xs font-medium text-zinc-700 block mb-1.5">Margen de Encuadernación ({bindingMarginMm} mm)</label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="20"
+                          step="1"
+                          value={bindingMarginMm}
+                          onChange={(e) => setBindingMarginMm(parseInt(e.target.value))}
+                          className="w-full accent-black cursor-pointer"
+                        />
+                        <span className="text-[10px] text-zinc-400 mt-1 block">Añade espacio extra alternado para anillado o lomo.</span>
                       </div>
                     )}
-                    <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-medium text-zinc-600">Márgenes de Impresión</span>
-                        <span className="text-xs text-zinc-400">{marginInches.toFixed(2)} in</span>
+
+                    {layoutMode !== '1up' && (
+                      <div className="flex items-center justify-between pt-2">
+                        <span className="text-xs font-medium text-zinc-700">Línea Divisoria Central</span>
+                        <input
+                          type="checkbox"
+                          checked={showSeparatorLine}
+                          onChange={(e) => setShowSeparatorLine(e.target.checked)}
+                          className="w-4 h-4 accent-black rounded cursor-pointer"
+                        />
                       </div>
-                      <input 
-                        type="range" 
-                        className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-black mb-4" 
-                        min="0" 
-                        max="1" 
-                        step="0.05" 
-                        value={marginInches} 
-                        onChange={(e) => setMarginInches(parseFloat(e.target.value))}
-                        onMouseUp={(e) => {
-                          if (currentFile) processPdf(currentFile, parseFloat((e.target as HTMLInputElement).value), layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                        }}
-                        onTouchEnd={(e) => {
-                          if (currentFile) processPdf(currentFile, parseFloat((e.target as HTMLInputElement).value), layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                        }}
-                      />
+                    )}
 
-                      <div className="flex justify-between items-center mb-2 pt-3 border-t border-zinc-200/60">
-                        <span className="text-xs font-medium text-zinc-600">Engargolado</span>
-                        <span className="text-xs text-zinc-400">{bindingMarginMm} mm</span>
-                      </div>
-                      <input 
-                        type="range" 
-                        className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-black mb-4" 
-                        min="0" 
-                        max="30" 
-                        step="1" 
-                        value={bindingMarginMm} 
-                        onChange={(e) => setBindingMarginMm(parseInt(e.target.value))}
-                        onMouseUp={(e) => {
-                          if (currentFile) processPdf(currentFile, marginInches, layoutMode, fillMode, showSeparatorLine, parseInt((e.target as HTMLInputElement).value), isDoubleSided, removeBlankPages);
-                        }}
-                        onTouchEnd={(e) => {
-                          if (currentFile) processPdf(currentFile, marginInches, layoutMode, fillMode, showSeparatorLine, parseInt((e.target as HTMLInputElement).value), isDoubleSided, removeBlankPages);
-                        }}
-                      />
-
-                      <div className="flex items-center justify-between pt-1">
-                         <span className="text-xs text-zinc-500">Márgenes Alternos</span>
-                         <label className="relative inline-flex items-center cursor-pointer">
-                            <input 
-                              type="checkbox" 
-                              className="sr-only peer" 
-                              checked={isDoubleSided}
-                              onChange={(e) => {
-                                setIsDoubleSided(e.target.checked);
-                                if (currentFile) processPdf(currentFile, marginInches, layoutMode, fillMode, showSeparatorLine, bindingMarginMm, e.target.checked, removeBlankPages);
-                              }}
-                            />
-                            <div className="w-7 h-4 bg-zinc-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-zinc-900"></div>
-                          </label>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section>
-                <div>
-                  <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 block mb-3">Escalado de Contenido</label>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => {
-                        setFillMode('fit');
-                        if (currentFile) processPdf(currentFile, marginInches, layoutMode, 'fit', showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                      }}
-                      className={`flex-1 py-2 px-3 text-xs font-medium rounded-lg border flex items-center justify-center gap-2 transition-all ${fillMode === 'fit' ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs' : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50'}`}
-                    >
-                      Proporcional
-                    </button>
-                    <button 
-                      onClick={() => {
-                        setFillMode('stretch');
-                        if (currentFile) processPdf(currentFile, marginInches, layoutMode, 'stretch', showSeparatorLine, bindingMarginMm, isDoubleSided, removeBlankPages);
-                      }}
-                      className={`flex-1 py-2 px-3 text-xs font-medium rounded-lg border flex items-center justify-center gap-2 transition-all ${fillMode === 'stretch' ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs' : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50'}`}
-                    >
-                      Estirar (Llenar)
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <section>
-                <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Trash2 className="w-4 h-4 text-zinc-500" />
-                      <span className="text-xs font-medium text-zinc-600">Eliminar hojas en blanco</span>
-                    </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        className="sr-only peer" 
+                    <div className="flex items-center justify-between pt-2">
+                      <span className="text-xs font-medium text-zinc-700">Eliminar Páginas en Blanco</span>
+                      <input
+                        type="checkbox"
                         checked={removeBlankPages}
-                        onChange={(e) => {
-                          setRemoveBlankPages(e.target.checked);
-                          if (currentFile) processPdf(currentFile, marginInches, layoutMode, fillMode, showSeparatorLine, bindingMarginMm, isDoubleSided, e.target.checked);
-                        }}
-                      />
-                      <div className="w-7 h-4 bg-zinc-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-zinc-900"></div>
-                    </label>
-                  </div>
-                  {removedCount > 0 && (
-                    <p className="text-[10px] text-green-600 mt-1 font-medium pl-6">
-                      Se eliminaron {removedCount} hojas en blanco.
-                    </p>
-                  )}
-                </div>
-              </section>
-            </>
-          ) : (
-            <>
-              <section>
-                <div>
-                  <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 block mb-3">Diseño del Álbum 4K XV Años</label>
-                  <div className="space-y-4">
-                    <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50">
-                      <span className="text-xs font-medium text-zinc-600 block mb-2">Orientación de Página</span>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setAlbumOrientation('portrait')}
-                          className={`flex-1 py-1.5 px-2 text-xs font-medium rounded border ${albumOrientation === 'portrait' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
-                        >
-                          Retrato (Vertical)
-                        </button>
-                        <button 
-                          onClick={() => setAlbumOrientation('landscape')}
-                          className={`flex-1 py-1.5 px-2 text-xs font-medium rounded border ${albumOrientation === 'landscape' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
-                        >
-                          Paisaje (Horizontal)
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50">
-                      <span className="text-xs font-medium text-zinc-600 block mb-2">Fotos por Página</span>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setAlbumPhotosPerPage(1)}
-                          className={`flex-1 py-1.5 px-2 text-xs font-medium rounded border ${albumPhotosPerPage === 1 ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
-                        >
-                          1 Foto (Completa)
-                        </button>
-                        <button 
-                          onClick={() => setAlbumPhotosPerPage(2)}
-                          className={`flex-1 py-1.5 px-2 text-xs font-medium rounded border ${albumPhotosPerPage === 2 ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
-                        >
-                          2 Fotos (Dúo)
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-zinc-400 mt-2">Calidad 4K sin pérdida de proporción ni compresión agresiva.</p>
-                    </div>
-
-                    <div className="p-3 border border-zinc-200 rounded-lg bg-zinc-50">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-medium text-zinc-600">Margen del Álbum</span>
-                        <span className="text-xs text-zinc-400">{marginInches.toFixed(2)} in</span>
-                      </div>
-                      <input 
-                        type="range" 
-                        className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-black" 
-                        min="0.2" 
-                        max="1" 
-                        step="0.05" 
-                        value={marginInches} 
-                        onChange={(e) => setMarginInches(parseFloat(e.target.value))}
+                        onChange={(e) => setRemoveBlankPages(e.target.checked)}
+                        className="w-4 h-4 accent-black rounded cursor-pointer"
                       />
                     </div>
-
-                    <div className="p-3 border border-pink-200 rounded-lg bg-pink-50/50">
-                      <div className="flex items-center gap-1.5 mb-1.5 text-pink-900 font-semibold text-xs">
-                        <Info className="w-4 h-4 text-pink-600 shrink-0" />
-                        Medidas y Proporción 4K
-                      </div>
-                      <p className="text-[11px] text-zinc-600 leading-relaxed">
-                        <strong>Formato Carta US:</strong> 8.5 × 11 pulgadas (612 × 792 pt).<br/>
-                        <strong>Sin Distorsión:</strong> Cada imagen mantiene su relación de aspecto original (<code className="bg-white px-1 py-0.5 rounded text-[10px]">width/height</code>) adaptándose al área útil con precisión geométrica.<br/>
-                        <strong>Calidad 4K:</strong> Normalizado a alta resolución (hasta 3840px / 300 DPI) para imprenta profesional.
-                      </p>
-                    </div>
+                    {removeBlankPages && removedCount > 0 && (
+                      <span className="text-[10px] text-green-600 block">Se han omitido {removedCount} páginas en blanco automáticamente.</span>
+                    )}
                   </div>
                 </div>
               </section>
 
-              {albumImages.length > 0 && (
-                <section>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500">Fotos 4K Cargadas ({albumImages.length})</label>
-                    <button 
-                      onClick={() => setAlbumImages([])}
-                      className="text-[10px] text-red-600 hover:underline"
+              {pageImages.length > 0 && (
+                <section className="pt-4 border-t border-zinc-200">
+                  <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 block mb-3">Vista Previa Libro</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setViewMode('book')}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${viewMode === 'book' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
                     >
-                      Limpiar todas
+                      Modo Libro
                     </button>
-                  </div>
-
-                  <button
-                    onClick={() => processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches)}
-                    disabled={isProcessing}
-                    className="w-full py-2.5 px-4 bg-black text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 hover:bg-zinc-800 transition-colors shadow-xs mb-3 disabled:opacity-50"
-                  >
-                    {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-white" />}
-                    {isProcessing ? processingStatus || "Procesando..." : `🚀 Generar Álbum 4K (${albumImages.length} fotos)`}
-                  </button>
-
-                  <div className="max-h-48 overflow-y-auto space-y-2 pr-1 border border-zinc-200 rounded-lg p-2 bg-zinc-50">
-                    {albumImages.map((item, idx) => (
-                      <div key={idx} className="flex items-center justify-between bg-white border border-zinc-200 p-2 rounded-md shadow-2xs">
-                        <div className="flex items-center gap-2 truncate">
-                          <img src={item.previewUrl} alt="" className="w-8 h-8 object-cover rounded border border-zinc-300 shrink-0" />
-                          <span className="text-xs text-zinc-700 truncate">{item.name}</span>
-                        </div>
-                        <button 
-                          onClick={() => removeAlbumImage(idx)}
-                          className="text-zinc-400 hover:text-red-600 p-1 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
+                    <button
+                      onClick={() => setViewMode('single')}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${viewMode === 'single' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200'}`}
+                    >
+                      Lista Simple
+                    </button>
                   </div>
                 </section>
               )}
             </>
-          )}
+          ) : (
+            <>
+              <section className="space-y-4">
+                <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 block">Configuración Álbum XV Años</label>
+                
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 block mb-1.5">Orientación del Álbum</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setAlbumOrientation('portrait')}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumOrientation === 'portrait' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                    >
+                      Vertical (Portrait)
+                    </button>
+                    <button
+                      onClick={() => setAlbumOrientation('landscape')}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumOrientation === 'landscape' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                    >
+                      Horizontal (Landscape)
+                    </button>
+                  </div>
+                </div>
 
-          <section className="mt-auto pt-4">
-            <div className="bg-zinc-900 rounded-xl p-4 text-white">
-              <p className="text-[10px] text-zinc-400 mb-1 uppercase tracking-wider">Estado del Motor 4K</p>
-              <div className="flex items-center justify-between">
-                <span className="text-xs">{isProcessing ? processingStatus || "Procesando..." : pageImages.length > 0 ? "Álbum 4K listo" : "Esperando archivos"}</span>
-                {isProcessing ? (
-                  <Loader2 className="w-3 h-3 text-zinc-400 animate-spin" />
-                ) : (
-                  <span className={`w-2 h-2 rounded-full ${pageImages.length > 0 ? "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" : "bg-zinc-600"}`}></span>
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 block mb-1.5">Fotos por Página</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setAlbumPhotosPerPage(1)}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumPhotosPerPage === 1 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                    >
+                      1 Foto (Grande)
+                    </button>
+                    <button
+                      onClick={() => setAlbumPhotosPerPage(2)}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumPhotosPerPage === 2 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                    >
+                      2 Fotos (Dúo)
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 block mb-1.5">Margen ({marginInches} in)</label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.5"
+                    step="0.1"
+                    value={marginInches}
+                    onChange={(e) => setMarginInches(parseFloat(e.target.value))}
+                    className="w-full accent-black cursor-pointer"
+                  />
+                </div>
+
+                {albumImages.length > 0 && (
+                  <div className="pt-4 border-t border-zinc-200">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-xs font-bold text-zinc-700">Fotos Seleccionadas ({albumImages.length})</span>
+                      <button onClick={() => setAlbumImages([])} className="text-[11px] text-red-600 hover:underline">Borrar todas</button>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto space-y-2 pr-1">
+                      {albumImages.map((img, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2 bg-zinc-50 border border-zinc-200 rounded-lg text-xs">
+                          <div className="flex items-center gap-2 truncate">
+                            <img src={img.previewUrl} alt={img.name} className="w-8 h-8 object-cover rounded" />
+                            <span className="truncate max-w-[140px] text-zinc-700">{img.name}</span>
+                          </div>
+                          <button onClick={() => removeAlbumImage(idx)} className="text-zinc-400 hover:text-red-600 p-1">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={() => processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches)}
+                      disabled={isProcessing}
+                      className="w-full mt-4 py-2.5 bg-pink-600 text-white font-semibold text-xs rounded-lg hover:bg-pink-700 transition-colors shadow-xs flex items-center justify-center gap-2"
+                    >
+                      {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-white" />}
+                      {isProcessing ? processingStatus || "Procesando..." : "Generar Álbum 4K Ahora"}
+                    </button>
+                  </div>
                 )}
-              </div>
+              </section>
+            </>
+          )}
+          
+          <div className="mt-auto pt-4 border-t border-zinc-200">
+            <div className="p-3 bg-zinc-50 rounded-lg border border-zinc-200 flex items-start gap-2.5">
+              <Info className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                {user ? `Sesión iniciada como ${user.email}. Tus documentos se sincronizan automáticamente.` : 'Inicia sesión con Google para guardar tus archivos anteriores en la nube.'}
+              </p>
             </div>
-          </section>
+          </div>
+
         </aside>
 
-        {/* Main Content Area */}
+        {/* Main Preview Area */}
         <section className="flex-1 flex flex-col items-center p-8 bg-zinc-100 relative overflow-y-auto print:overflow-visible print:p-0 print:bg-white print:block pb-24">
           
           {pageImages.length === 0 ? (

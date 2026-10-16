@@ -1,0 +1,24 @@
+{
+  "entities": {
+    "UserFile": {
+      "title": "User File",
+      "description": "Saved PDF or Album file metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "fileType": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "dataUrl": { "type": "string" }
+      },
+      "required": ["id", "userId", "name", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/files/{fileId}": {
+      "schema": { "$ref": "#/entities/UserFile" },
+      "description": "Stored files and generated books for authenticated user"
+    }
+  }
+}
