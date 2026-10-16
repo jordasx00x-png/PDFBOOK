@@ -3,7 +3,8 @@ import { useDropzone } from 'react-dropzone';
 import { PDFDocument, rgb } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle, User as UserIcon, LogOut, FolderOpen, Cloud, Bookmark } from 'lucide-react';
-import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, db, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, User } from './firebase';
+import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, db, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, User } from './firebase';
+
 
 // @ts-ignore
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -141,6 +142,10 @@ export default function App() {
 
   // Auth observer & fetch saved files
   useEffect(() => {
+    getRedirectResult(auth).catch((err) => {
+      console.error("Redirect result error:", err);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
@@ -166,9 +171,14 @@ export default function App() {
   const handleGoogleLogin = async () => {
     try {
       await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      console.error("Error al iniciar sesión con Google:", err);
-      alert("No se pudo iniciar sesión con Google.");
+    } catch (err: any) {
+      console.warn("Popup sign-in failed, trying redirect:", err);
+      try {
+        await signInWithRedirect(auth, googleProvider);
+      } catch (redirectErr: any) {
+        console.error("Error al iniciar sesión con Google:", redirectErr);
+        alert("No se pudo iniciar sesión con Google. Por favor, permite las ventanas emergentes o intenta nuevamente.");
+      }
     }
   };
 
