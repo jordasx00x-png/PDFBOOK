@@ -20,7 +20,9 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install --include=optional --force
+        run: |
+          rm -f package-lock.json bun.lock
+          npm install --include=optional --force
 
       - name: Build
         run: npm run build
