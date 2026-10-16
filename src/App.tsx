@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { PDFDocument, rgb } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
-import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play } from 'lucide-react';
+import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle } from 'lucide-react';
 
 // @ts-ignore
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -214,9 +214,6 @@ export default function App() {
         let pagesForLayout: (any | null)[] = [...embeddedPages];
         
         if (layout === 'booklet') {
-          while (pagesForLayout.length % 2 !== 0) {
-            pagesForLayout.push(null);
-          }
           const bookletPages = [];
           const N = pagesForLayout.length;
           for (let i = 0; i < N / 2; i++) {
@@ -349,15 +346,14 @@ export default function App() {
         const innerH = LETTER_H - MARGIN * 2;
 
         for (let i = 0; i < imagesList.length; i++) {
-          setProcessingStatus(`Procesando foto 4K ${i + 1} de ${imagesList.length}...`);
-          await new Promise(r => setTimeout(r, 0));
+          setProcessingStatus(`Procesando foto 4K ${i + 1} de ${imagesList.length} (Proporción exacta)...`);
+          await new Promise(r => setTimeout(r, 4)); // Yield to keep UI smooth with 50+ photos
 
           const item = imagesList[i];
           const { bytes, type } = await normalizeImageToBytes(item.file);
           const embeddedImg = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
           
-          const imgDims = embeddedImg.scale(1);
-          const imgAspect = imgDims.width / imgDims.height;
+          const imgAspect = embeddedImg.width / embeddedImg.height;
           
           let targetW = innerW;
           let targetH = innerW / imgAspect;
@@ -394,8 +390,8 @@ export default function App() {
         const innerHeight2 = SHEET_H - MARGIN * 2;
 
         for (let i = 0; i < imagesList.length; i += 2) {
-          setProcessingStatus(`Procesando par 4K ${Math.floor(i / 2) + 1} de ${Math.ceil(imagesList.length / 2)}...`);
-          await new Promise(r => setTimeout(r, 0));
+          setProcessingStatus(`Procesando pliego 4K ${Math.floor(i / 2) + 1} de ${Math.ceil(imagesList.length / 2)}...`);
+          await new Promise(r => setTimeout(r, 4));
 
           const page = newPdf.addPage([SHEET_W, SHEET_H]);
           page.drawRectangle({ x: 0, y: 0, width: SHEET_W, height: SHEET_H, color: rgb(1, 1, 1) });
@@ -438,8 +434,8 @@ export default function App() {
         }
       }
 
-      setProcessingStatus("Generando vista previa en alta definición...");
-      await new Promise(r => setTimeout(r, 0));
+      setProcessingStatus("Generando vista previa optimizada en alta definición...");
+      await new Promise(r => setTimeout(r, 10));
 
       const newPdfBytes = await newPdf.save();
       const bytesForExport = new Uint8Array(newPdfBytes);
@@ -449,9 +445,14 @@ export default function App() {
       const loadedPdf = await loadingTask.promise;
 
       const images: string[] = [];
+      const previewScale = loadedPdf.numPages > 25 ? 1.5 : 2;
       for (let i = 1; i <= loadedPdf.numPages; i++) {
+        if (i % 10 === 0) {
+          setProcessingStatus(`Renderizando vista previa (${i}/${loadedPdf.numPages})...`);
+          await new Promise(r => setTimeout(r, 2));
+        }
         const page = await loadedPdf.getPage(i);
-        const viewport = page.getViewport({ scale: 2 });
+        const viewport = page.getViewport({ scale: previewScale });
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
         if (!context) continue;
@@ -871,6 +872,18 @@ export default function App() {
                         value={marginInches} 
                         onChange={(e) => setMarginInches(parseFloat(e.target.value))}
                       />
+                    </div>
+
+                    <div className="p-3 border border-pink-200 rounded-lg bg-pink-50/50">
+                      <div className="flex items-center gap-1.5 mb-1.5 text-pink-900 font-semibold text-xs">
+                        <Info className="w-4 h-4 text-pink-600 shrink-0" />
+                        Medidas y Proporción 4K
+                      </div>
+                      <p className="text-[11px] text-zinc-600 leading-relaxed">
+                        <strong>Formato Carta US:</strong> 8.5 × 11 pulgadas (612 × 792 pt).<br/>
+                        <strong>Sin Distorsión:</strong> Cada imagen mantiene su relación de aspecto original (<code className="bg-white px-1 py-0.5 rounded text-[10px]">width/height</code>) adaptándose al área útil con precisión geométrica.<br/>
+                        <strong>Calidad 4K:</strong> Normalizado a alta resolución (hasta 3840px / 300 DPI) para imprenta profesional.
+                      </p>
                     </div>
                   </div>
                 </div>
