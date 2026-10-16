@@ -2,8 +2,8 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { PDFDocument, rgb } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
-import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle, User as UserIcon, LogOut, FolderOpen, Cloud, Bookmark } from 'lucide-react';
-import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, db, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, User } from './firebase';
+import { UploadCloud, Download, Printer, RefreshCw, FileText, Loader2, Info, Layers, CheckCircle2, BookOpen, File as FileIcon, Trash2, Camera, Sparkles, Plus, Image as ImageIcon, Play, AlertCircle, User as UserIcon, LogOut, FolderOpen, Cloud, Bookmark, Mail } from 'lucide-react';
+import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, db, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, User } from './firebase';
 
 
 // @ts-ignore
@@ -139,6 +139,31 @@ export default function App() {
   const [albumImages, setAlbumImages] = useState<{ file: File; previewUrl: string; name: string }[]>([]);
   const [albumOrientation, setAlbumOrientation] = useState<'portrait' | 'landscape'>('portrait');
   const [albumPhotosPerPage, setAlbumPhotosPerPage] = useState<1 | 2>(1);
+
+  // Email Auth state & handlers
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      if (isRegistering) {
+        await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      }
+      setIsEmailModalOpen(false);
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (err: any) {
+      console.error("Auth error:", err);
+      setAuthError(err.message || "Error al autenticarse.");
+    }
+  };
 
   // Auth observer & fetch saved files
   useEffect(() => {
@@ -740,6 +765,13 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <button
+              onClick={() => setIsEmailModalOpen(true)}
+              className="px-4 py-2 bg-zinc-900 text-white text-xs font-semibold rounded-xl hover:bg-zinc-800 transition-all border border-zinc-800 shadow-sm flex items-center gap-1.5"
+            >
+              <Mail className="w-3.5 h-3.5 text-pink-400" />
+              Iniciar con Correo
+            </button>
+            <button
               onClick={handleGoogleLogin}
               className="px-4 py-2 bg-white text-zinc-950 text-xs font-semibold rounded-xl hover:bg-zinc-200 transition-all shadow-md flex items-center gap-2"
             >
@@ -779,7 +811,15 @@ export default function App() {
                 <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
                 <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
               </svg>
-              Iniciar sesión con Google y Guardar Archivos
+              Iniciar sesión con Google
+            </button>
+
+            <button
+              onClick={() => setIsEmailModalOpen(true)}
+              className="w-full sm:w-auto px-8 py-4 bg-zinc-900 text-white font-semibold rounded-2xl hover:bg-zinc-800 transition-all border border-zinc-800 text-sm flex items-center justify-center gap-2"
+            >
+              <Mail className="w-4 h-4 text-pink-400" />
+              Iniciar con Correo y Contraseña
             </button>
 
             <button
@@ -818,7 +858,7 @@ export default function App() {
               </div>
               <h3 className="text-base font-bold text-white mb-2">Historial en la Nube</h3>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                Inicia sesión con Google para sincronizar tus archivos procesados y recuperarlos en cualquier momento y desde cualquier dispositivo.
+                Inicia sesión con Google o Correo para sincronizar tus archivos procesados y recuperarlos en cualquier momento y desde cualquier dispositivo.
               </p>
             </div>
           </div>
@@ -826,8 +866,76 @@ export default function App() {
 
         {/* Footer */}
         <footer className="px-8 py-6 border-t border-zinc-800/80 text-center text-xs text-zinc-500">
-          PDF a Libro & Álbum 4K Engine • Seguro con Firebase & Google Auth
+          PDF a Libro & Álbum 4K Engine • Seguro con Firebase & Google/Email Auth
         </footer>
+
+        {/* Email Auth Modal */}
+        {isEmailModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-6 text-white shadow-2xl relative">
+              <button
+                onClick={() => setIsEmailModalOpen(false)}
+                className="absolute top-4 right-4 text-zinc-400 hover:text-white text-lg font-bold"
+              >
+                ✕
+              </button>
+              <h3 className="text-lg font-bold mb-1">
+                {isRegistering ? 'Crear Cuenta con Correo' : 'Iniciar Sesión con Correo'}
+              </h3>
+              <p className="text-xs text-zinc-400 mb-6">
+                Acceso alternativo instantáneo para guardar y sincronizar tus archivos en la nube.
+              </p>
+
+              {authError && (
+                <div className="mb-4 p-3 bg-red-950/60 border border-red-800 rounded-lg text-xs text-red-200">
+                  {authError}
+                </div>
+              )}
+
+              <form onSubmit={handleEmailAuth} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1">Correo Electrónico</label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="tu@correo.com"
+                    className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-pink-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1">Contraseña</label>
+                  <input
+                    type="password"
+                    required
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-pink-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-3 bg-white text-zinc-950 font-bold rounded-xl hover:bg-zinc-200 transition-colors text-sm shadow-md"
+                >
+                  {isRegistering ? 'Registrarse y Entrar' : 'Iniciar Sesión'}
+                </button>
+              </form>
+
+              <div className="mt-4 text-center">
+                <button
+                  onClick={() => { setIsRegistering(!isRegistering); setAuthError(''); }}
+                  className="text-xs text-pink-400 hover:underline"
+                >
+                  {isRegistering ? '¿Ya tienes cuenta? Inicia sesión' : '¿No tienes cuenta? Regístrate aquí'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
