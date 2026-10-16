@@ -202,7 +202,11 @@ export default function App() {
         await signInWithRedirect(auth, googleProvider);
       } catch (redirectErr: any) {
         console.error("Error al iniciar sesión con Google:", redirectErr);
-        alert("No se pudo iniciar sesión con Google. Por favor, permite las ventanas emergentes o intenta nuevamente.");
+        if (redirectErr?.code === 'auth/unauthorized-domain' || redirectErr?.message?.includes('unauthorized-domain')) {
+          alert("El dominio de GitHub Pages no está autorizado en Firebase. Para usar Google Auth en GitHub, ve a tu consola de Firebase -> Authentication -> Settings -> Authorized domains y añade tu dominio. Mientras tanto, puedes usar 'Iniciar con Correo y Contraseña'.");
+        } else {
+          alert("El inicio con Google está restringido en este dominio externo. Por favor, utiliza el botón 'Iniciar con Correo y Contraseña' para guardar tus archivos en la nube de forma segura.");
+        }
       }
     }
   };
