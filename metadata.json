@@ -1,0 +1,6 @@
+{
+  "name": "PDF to Book Converter",
+  "description": "Una aplicación web que convierte archivos PDF a un formato estilo libro tamaño carta, centrado y optimizado para impresión física.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

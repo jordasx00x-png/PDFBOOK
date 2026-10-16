@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@media print {
+  body {
+    background-color: white !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  html, body, #root {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    background: transparent !important;
+    overflow: visible !important;
+  }
+  .print-container {
+    display: block !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+  .print-row {
+    display: block !important;
+    box-shadow: none !important;
+  }
+  .print-page {
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+  .book-spine {
+    display: none !important;
+  }
+  .book-placeholder {
+    display: none !important;
+  }
+  .print-page img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+}
