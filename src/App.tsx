@@ -57,7 +57,7 @@ async function getNonBlankPages(fileBuffer: ArrayBuffer): Promise<number[]> {
   return nonBlankIndices;
 }
 
-async function normalizeImageToBytes(file: File): Promise<{ bytes: Uint8Array; type: 'jpg' | 'png' }> {
+async function normalizeImageToBytes(file: File, autoRotate: boolean = false): Promise<{ bytes: Uint8Array; type: 'jpg' | 'png' }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -65,25 +65,43 @@ async function normalizeImageToBytes(file: File): Promise<{ bytes: Uint8Array; t
       img.onload = () => {
         const canvas = document.createElement('canvas');
         const MAX_DIM = 3840;
-        let w = img.width;
-        let h = img.height;
-        if (w > MAX_DIM || h > MAX_DIM) {
-          if (w > h) {
-            h = Math.round((h * MAX_DIM) / w);
-            w = MAX_DIM;
+        const origW = img.width;
+        const origH = img.height;
+        const shouldRotate = autoRotate && origW > origH;
+
+        let targetW = shouldRotate ? origH : origW;
+        let targetH = shouldRotate ? origW : origH;
+
+        if (targetW > MAX_DIM || targetH > MAX_DIM) {
+          if (targetW > targetH) {
+            targetH = Math.round((targetH * MAX_DIM) / targetW);
+            targetW = MAX_DIM;
           } else {
-            w = Math.round((w * MAX_DIM) / h);
-            h = MAX_DIM;
+            targetW = Math.round((targetW * MAX_DIM) / targetH);
+            targetH = MAX_DIM;
           }
         }
-        canvas.width = w;
-        canvas.height = h;
+
+        canvas.width = targetW;
+        canvas.height = targetH;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           reject(new Error('Could not get canvas context'));
           return;
         }
-        ctx.drawImage(img, 0, 0, w, h);
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        if (shouldRotate) {
+          ctx.save();
+          ctx.translate(targetW / 2, targetH / 2);
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(img, -targetH / 2, -targetW / 2, targetH, targetW);
+          ctx.restore();
+        } else {
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+        }
         
         const isPng = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png');
         const mimeType = isPng ? 'image/png' : 'image/jpeg';
@@ -138,7 +156,10 @@ export default function App() {
   // Album XV Años settings
   const [albumImages, setAlbumImages] = useState<{ file: File; previewUrl: string; name: string }[]>([]);
   const [albumOrientation, setAlbumOrientation] = useState<'portrait' | 'landscape'>('portrait');
-  const [albumPhotosPerPage, setAlbumPhotosPerPage] = useState<1 | 2>(1);
+  const [albumPhotosPerPage, setAlbumPhotosPerPage] = useState<1 | 2 | 4>(1);
+  const [autoRotateLandscape, setAutoRotateLandscape] = useState(true);
+  const [albumPhotoScale, setAlbumPhotoScale] = useState(1.15);
+  const [albumFitMode, setAlbumFitMode] = useState<'fit' | 'fill'>('fit');
 
   // Email Auth state & handlers
   const [authEmail, setAuthEmail] = useState('');
@@ -544,8 +565,11 @@ export default function App() {
   const processAlbumPdf = async (
     imagesList: { file: File; previewUrl: string; name: string }[],
     orientation: 'portrait' | 'landscape',
-    photosPerPage: 1 | 2,
-    marginVal: number
+    photosPerPage: 1 | 2 | 4,
+    marginVal: number,
+    autoRotate: boolean,
+    photoScale: number,
+    fitMode: 'fit' | 'fill'
   ) => {
     if (imagesList.length === 0) return;
     setIsProcessing(true);
@@ -555,7 +579,7 @@ export default function App() {
     try {
       const newPdf = await PDFDocument.create();
       
-      const isLandscape = orientation === 'landscape' || photosPerPage === 2;
+      const isLandscape = orientation === 'landscape' || photosPerPage === 4 || photosPerPage === 2;
       const PAGE_W = isLandscape ? 792 : 612;
       const PAGE_H = isLandscape ? 612 : 792;
       const MARGIN = marginVal * 72;
@@ -563,53 +587,65 @@ export default function App() {
       const availW = PAGE_W - MARGIN * 2;
       const availH = PAGE_H - MARGIN * 2;
 
-      if (photosPerPage === 1) {
-        for (let i = 0; i < imagesList.length; i++) {
-          const imgItem = imagesList[i];
-          const { bytes, type } = await normalizeImageToBytes(imgItem.file);
-          const embeddedImage = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-          
-          const page = newPdf.addPage([PAGE_W, PAGE_H]);
-          const imgDims = embeddedImage.scale(1);
-          
-          let scaleX = availW / imgDims.width;
-          let scaleY = availH / imgDims.height;
-          const minScale = Math.min(scaleX, scaleY);
-          
-          const sW = imgDims.width * minScale;
-          const sH = imgDims.height * minScale;
-          const xOff = MARGIN + (availW - sW) / 2;
-          const yOff = MARGIN + (availH - sH) / 2;
+      const itemsPerPage = photosPerPage;
 
-          page.drawImage(embeddedImage, {
-            x: xOff,
-            y: yOff,
-            width: sW,
-            height: sH,
-          });
-        }
-      } else {
-        // 2 photos per page
-        for (let i = 0; i < imagesList.length; i += 2) {
-          const page = newPdf.addPage([PAGE_W, PAGE_H]);
-          const halfW = availW / 2;
+      for (let i = 0; i < imagesList.length; i += itemsPerPage) {
+        const page = newPdf.addPage([PAGE_W, PAGE_H]);
+        const pageImagesSub = imagesList.slice(i, i + itemsPerPage);
 
-          // Photo 1 (Left)
-          const imgItem1 = imagesList[i];
-          if (imgItem1) {
-            const { bytes, type } = await normalizeImageToBytes(imgItem1.file);
-            const embeddedImage1 = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-            const dims1 = embeddedImage1.scale(1);
+        if (photosPerPage === 1) {
+          const imgItem = pageImagesSub[0];
+          if (imgItem) {
+            const { bytes, type } = await normalizeImageToBytes(imgItem.file, autoRotate);
+            const embeddedImage = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+            const dims = embeddedImage.scale(1);
+
+            let scaleX = availW / dims.width;
+            let scaleY = availH / dims.height;
+            let baseScale = fitMode === 'fill' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+            let finalScale = baseScale * photoScale;
+
+            if (fitMode === 'fit') {
+              const maxS = Math.min(availW / dims.width, availH / dims.height) * Math.min(photoScale, 1.25);
+              finalScale = Math.min(finalScale, maxS);
+            }
+
+            const sW = dims.width * finalScale;
+            const sH = dims.height * finalScale;
+            const xOff = MARGIN + (availW - sW) / 2;
+            const yOff = MARGIN + (availH - sH) / 2;
+
+            page.drawImage(embeddedImage, {
+              x: xOff,
+              y: yOff,
+              width: sW,
+              height: sH,
+            });
+          }
+        } else if (photosPerPage === 2) {
+          const gutter = 20;
+          const cellW = (availW - gutter) / 2;
+          const cellH = availH;
+
+          for (let idx = 0; idx < pageImagesSub.length; idx++) {
+            const imgItem = pageImagesSub[idx];
+            const { bytes, type } = await normalizeImageToBytes(imgItem.file, autoRotate);
+            const embeddedImage = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+            const dims = embeddedImage.scale(1);
+
+            const fitScale = Math.min(cellW / dims.width, cellH / dims.height);
+            let finalScale = fitScale * Math.min(photoScale, 1.0);
+
+            const sW = dims.width * finalScale;
+            const sH = dims.height * finalScale;
             
-            let scX = (halfW - 10) / dims1.width;
-            let scY = availH / dims1.height;
-            let mSc = Math.min(scX, scY);
-            let sW = dims1.width * mSc;
-            let sH = dims1.height * mSc;
-            let xOff = MARGIN + (halfW - sW) / 2;
-            let yOff = MARGIN + (availH - sH) / 2;
+            const cellX = MARGIN + idx * (cellW + gutter);
+            const cellY = MARGIN;
 
-            page.drawImage(embeddedImage1, {
+            const xOff = cellX + (cellW - sW) / 2;
+            const yOff = cellY + (cellH - sH) / 2;
+
+            page.drawImage(embeddedImage, {
               x: xOff,
               y: yOff,
               width: sW,
@@ -617,34 +653,62 @@ export default function App() {
             });
           }
 
-          // Photo 2 (Right)
-          const imgItem2 = imagesList[i + 1];
-          if (imgItem2) {
-            const { bytes, type } = await normalizeImageToBytes(imgItem2.file);
-            const embeddedImage2 = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
-            const dims2 = embeddedImage2.scale(1);
-            
-            let scX = (halfW - 10) / dims2.width;
-            let scY = availH / dims2.height;
-            let mSc = Math.min(scX, scY);
-            let sW = dims2.width * mSc;
-            let sH = dims2.height * mSc;
-            let xOff = MARGIN + halfW + 10 + (halfW - sW) / 2;
-            let yOff = MARGIN + (availH - sH) / 2;
-
-            page.drawImage(embeddedImage2, {
-              x: xOff,
-              y: yOff,
-              width: sW,
-              height: sH,
-            });
-          }
-
+          // Center separator line
           page.drawLine({
             start: { x: PAGE_W / 2, y: MARGIN },
             end: { x: PAGE_W / 2, y: PAGE_H - MARGIN },
             thickness: 0.5,
             color: rgb(0.8, 0.8, 0.8),
+          });
+
+        } else {
+          // 4 photos (2x2 Grid)
+          const gutterX = 20;
+          const gutterY = 20;
+          const cellW = (availW - gutterX) / 2;
+          const cellH = (availH - gutterY) / 2;
+
+          for (let idx = 0; idx < pageImagesSub.length; idx++) {
+            const imgItem = pageImagesSub[idx];
+            const { bytes, type } = await normalizeImageToBytes(imgItem.file, autoRotate);
+            const embeddedImage = type === 'png' ? await newPdf.embedPng(bytes) : await newPdf.embedJpg(bytes);
+            const dims = embeddedImage.scale(1);
+
+            const fitScale = Math.min(cellW / dims.width, cellH / dims.height);
+            let finalScale = fitScale * Math.min(photoScale, 1.0);
+
+            const sW = dims.width * finalScale;
+            const sH = dims.height * finalScale;
+
+            const row = Math.floor(idx / 2); // 0 or 1
+            const col = idx % 2; // 0 or 1
+
+            const cellX = MARGIN + col * (cellW + gutterX);
+            const cellY = MARGIN + (1 - row) * (cellH + gutterY);
+
+            const xOff = cellX + (cellW - sW) / 2;
+            const yOff = cellY + (cellH - sH) / 2;
+
+            page.drawImage(embeddedImage, {
+              x: xOff,
+              y: yOff,
+              width: sW,
+              height: sH,
+            });
+          }
+
+          // Grid cross lines
+          page.drawLine({
+            start: { x: PAGE_W / 2, y: MARGIN },
+            end: { x: PAGE_W / 2, y: PAGE_H - MARGIN },
+            thickness: 0.5,
+            color: rgb(0.85, 0.85, 0.85),
+          });
+          page.drawLine({
+            start: { x: MARGIN, y: PAGE_H / 2 },
+            end: { x: PAGE_W - MARGIN, y: PAGE_H / 2 },
+            thickness: 0.5,
+            color: rgb(0.85, 0.85, 0.85),
           });
         }
       }
@@ -749,200 +813,6 @@ export default function App() {
     setCurrentFile(null);
     setAlbumImages([]);
   };
-
-  if (!user && !skippedLogin) {
-    return (
-      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col justify-between selection:bg-pink-500 selection:text-white">
-        {/* Header */}
-        <header className="px-8 py-6 flex items-center justify-between border-b border-zinc-800/80">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-lg">
-              <Layers className="w-6 h-6 text-zinc-950" />
-            </div>
-            <div>
-              <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
-                PDF a Libro & Álbum 4K Pro
-                <span className="text-[10px] bg-pink-500/20 text-pink-400 px-2 py-0.5 rounded border border-pink-500/30 font-bold">4K ULTRA PRINT</span>
-              </h1>
-              <p className="text-xs text-zinc-400">Conversión profesional y maquetación de alta calidad</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setIsEmailModalOpen(true)}
-              className="px-4 py-2 bg-zinc-900 text-white text-xs font-semibold rounded-xl hover:bg-zinc-800 transition-all border border-zinc-800 shadow-sm flex items-center gap-1.5"
-            >
-              <Mail className="w-3.5 h-3.5 text-pink-400" />
-              Iniciar con Correo
-            </button>
-            <button
-              onClick={handleGoogleLogin}
-              className="px-4 py-2 bg-white text-zinc-950 text-xs font-semibold rounded-xl hover:bg-zinc-200 transition-all shadow-md flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-              </svg>
-              Iniciar sesión con Google
-            </button>
-          </div>
-        </header>
-
-        {/* Hero Section */}
-        <main className="flex-1 max-w-6xl mx-auto px-6 py-16 flex flex-col items-center justify-center text-center">
-          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium bg-zinc-900 text-zinc-300 border border-zinc-800 mb-6 shadow-inner">
-            <Sparkles className="w-3.5 h-3.5 text-pink-400" /> Sincronización en la nube con Firebase & Google Auth
-          </div>
-
-          <h2 className="text-4xl md:text-6xl font-extrabold tracking-tight text-white mb-6 max-w-3xl leading-tight">
-            Convierte tus documentos en <span className="text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-amber-200">obras de arte impresas</span>
-          </h2>
-
-          <p className="text-base md:text-lg text-zinc-400 mb-10 max-w-2xl leading-relaxed">
-            Transforma cualquier PDF en un libro encuadernado perfecto o crea álbumes fotográficos profesionales de XV años en calidad 4K UHD. Guarda tus archivos en la nube y accede a ellos desde cualquier lugar.
-          </p>
-
-          <div className="flex flex-col sm:flex-row items-center gap-4 mb-16">
-            <button
-              onClick={handleGoogleLogin}
-              className="w-full sm:w-auto px-8 py-4 bg-white text-zinc-950 font-bold rounded-2xl hover:bg-zinc-200 transition-all shadow-xl flex items-center justify-center gap-3 text-sm"
-            >
-              <svg className="w-5 h-5" viewBox="0 0 24 24">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-              </svg>
-              Iniciar sesión con Google
-            </button>
-
-            <button
-              onClick={() => setIsEmailModalOpen(true)}
-              className="w-full sm:w-auto px-8 py-4 bg-zinc-900 text-white font-semibold rounded-2xl hover:bg-zinc-800 transition-all border border-zinc-800 text-sm flex items-center justify-center gap-2"
-            >
-              <Mail className="w-4 h-4 text-pink-400" />
-              Iniciar con Correo y Contraseña
-            </button>
-
-            <button
-              onClick={() => setSkippedLogin(true)}
-              className="w-full sm:w-auto px-8 py-4 bg-zinc-900 text-zinc-300 font-semibold rounded-2xl hover:bg-zinc-800 hover:text-white transition-all border border-zinc-800 text-sm"
-            >
-              Explorar aplicación sin cuenta →
-            </button>
-          </div>
-
-          {/* Feature Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-left w-full max-w-5xl">
-            <div className="bg-zinc-900/60 border border-zinc-800/80 p-6 rounded-2xl backdrop-blur-md">
-              <div className="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center text-white mb-4">
-                <FileText className="w-5 h-5 text-zinc-300" />
-              </div>
-              <h3 className="text-base font-bold text-white mb-2">PDF a Libro Profesional</h3>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                Ajusta márgenes de encuadernación, elimina páginas en blanco automáticamente y maqueta en formatos 1up, 2up o cuadernillo (booklet).
-              </p>
-            </div>
-
-            <div className="bg-zinc-900/60 border border-zinc-800/80 p-6 rounded-2xl backdrop-blur-md">
-              <div className="w-10 h-10 rounded-xl bg-pink-950/60 flex items-center justify-center text-pink-400 mb-4 border border-pink-900/50">
-                <Camera className="w-5 h-5" />
-              </div>
-              <h3 className="text-base font-bold text-white mb-2">Álbum de XV Años 4K</h3>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                Crea álbumes fotográficos de XV años con ultra alta resolución (3840px), diseños elegantes y listos para enviar a imprenta.
-              </p>
-            </div>
-
-            <div className="bg-zinc-900/60 border border-zinc-800/80 p-6 rounded-2xl backdrop-blur-md">
-              <div className="w-10 h-10 rounded-xl bg-blue-950/60 flex items-center justify-center text-blue-400 mb-4 border border-blue-900/50">
-                <Cloud className="w-5 h-5" />
-              </div>
-              <h3 className="text-base font-bold text-white mb-2">Historial en la Nube</h3>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                Inicia sesión con Google o Correo para sincronizar tus archivos procesados y recuperarlos en cualquier momento y desde cualquier dispositivo.
-              </p>
-            </div>
-          </div>
-        </main>
-
-        {/* Footer */}
-        <footer className="px-8 py-6 border-t border-zinc-800/80 text-center text-xs text-zinc-500">
-          PDF a Libro & Álbum 4K Engine • Seguro con Firebase & Google/Email Auth
-        </footer>
-
-        {/* Email Auth Modal */}
-        {isEmailModalOpen && (
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-6 text-white shadow-2xl relative">
-              <button
-                onClick={() => setIsEmailModalOpen(false)}
-                className="absolute top-4 right-4 text-zinc-400 hover:text-white text-lg font-bold"
-              >
-                ✕
-              </button>
-              <h3 className="text-lg font-bold mb-1">
-                {isRegistering ? 'Crear Cuenta con Correo' : 'Iniciar Sesión con Correo'}
-              </h3>
-              <p className="text-xs text-zinc-400 mb-6">
-                Acceso alternativo instantáneo para guardar y sincronizar tus archivos en la nube.
-              </p>
-
-              {authError && (
-                <div className="mb-4 p-3 bg-red-950/60 border border-red-800 rounded-lg text-xs text-red-200">
-                  {authError}
-                </div>
-              )}
-
-              <form onSubmit={handleEmailAuth} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1">Correo Electrónico</label>
-                  <input
-                    type="email"
-                    required
-                    value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
-                    placeholder="tu@correo.com"
-                    className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-pink-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1">Contraseña</label>
-                  <input
-                    type="password"
-                    required
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-pink-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full py-3 bg-white text-zinc-950 font-bold rounded-xl hover:bg-zinc-200 transition-colors text-sm shadow-md"
-                >
-                  {isRegistering ? 'Registrarse y Entrar' : 'Iniciar Sesión'}
-                </button>
-              </form>
-
-              <div className="mt-4 text-center">
-                <button
-                  onClick={() => { setIsRegistering(!isRegistering); setAuthError(''); }}
-                  className="text-xs text-pink-400 hover:underline"
-                >
-                  {isRegistering ? '¿Ya tienes cuenta? Inicia sesión' : '¿No tienes cuenta? Regístrate aquí'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div className="h-screen overflow-hidden print:overflow-visible flex flex-col bg-[#F4F4F5] text-zinc-900 font-sans print:h-auto print:bg-white print:block">
@@ -1300,18 +1170,24 @@ export default function App() {
 
                 <div>
                   <label className="text-xs font-medium text-zinc-700 block mb-1.5">Fotos por Página</label>
-                  <div className="flex gap-2">
+                  <div className="grid grid-cols-3 gap-1.5">
                     <button
                       onClick={() => setAlbumPhotosPerPage(1)}
-                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumPhotosPerPage === 1 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                      className={`py-1.5 px-1 text-[11px] font-medium rounded border ${albumPhotosPerPage === 1 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
                     >
-                      1 Foto (Grande)
+                      1 Foto
                     </button>
                     <button
                       onClick={() => setAlbumPhotosPerPage(2)}
-                      className={`flex-1 py-1.5 text-xs font-medium rounded border ${albumPhotosPerPage === 2 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                      className={`py-1.5 px-1 text-[11px] font-medium rounded border ${albumPhotosPerPage === 2 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
                     >
-                      2 Fotos (Dúo)
+                      2 Fotos
+                    </button>
+                    <button
+                      onClick={() => setAlbumPhotosPerPage(4)}
+                      className={`py-1.5 px-1 text-[11px] font-medium rounded border ${albumPhotosPerPage === 4 ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                    >
+                      4 Fotos (Grid)
                     </button>
                   </div>
                 </div>
@@ -1327,6 +1203,55 @@ export default function App() {
                     onChange={(e) => setMarginInches(parseFloat(e.target.value))}
                     className="w-full accent-black cursor-pointer"
                   />
+                </div>
+
+                {/* New Section for Photo Scaling and Auto-Rotation */}
+                <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-lg space-y-3">
+                  <span className="text-xs font-bold text-zinc-800 block">Tamaño y Orientación de Fotos</span>
+                  
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-600">Voltear horizontales (Auto)</span>
+                    <input
+                      type="checkbox"
+                      checked={autoRotateLandscape}
+                      onChange={(e) => setAutoRotateLandscape(e.target.checked)}
+                      className="w-4 h-4 accent-black rounded cursor-pointer"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-xs text-zinc-600">Tamaño / Zoom de Foto</span>
+                      <span className="text-[10px] font-mono bg-zinc-200 px-1.5 py-0.5 rounded text-zinc-700">{Math.round(albumPhotoScale * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.8"
+                      max="1.5"
+                      step="0.05"
+                      value={albumPhotoScale}
+                      onChange={(e) => setAlbumPhotoScale(parseFloat(e.target.value))}
+                      className="w-full accent-black cursor-pointer"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-600 block mb-1">Modo de Ajuste</label>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={() => setAlbumFitMode('fit')}
+                        className={`flex-1 py-1 text-[11px] font-medium rounded border ${albumFitMode === 'fit' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                      >
+                        Ajustar (Fit)
+                      </button>
+                      <button
+                        onClick={() => setAlbumFitMode('fill')}
+                        className={`flex-1 py-1 text-[11px] font-medium rounded border ${albumFitMode === 'fill' ? 'bg-black text-white border-black' : 'bg-white text-zinc-700 border-zinc-200'}`}
+                      >
+                        Llenar (Fill)
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {albumImages.length > 0 && (
@@ -1350,7 +1275,7 @@ export default function App() {
                     </div>
 
                     <button
-                      onClick={() => processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches)}
+                      onClick={() => processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches, autoRotateLandscape, albumPhotoScale, albumFitMode)}
                       disabled={isProcessing}
                       className="w-full mt-4 py-2.5 bg-pink-600 text-white font-semibold text-xs rounded-lg hover:bg-pink-700 transition-colors shadow-xs flex items-center justify-center gap-2"
                     >
@@ -1454,7 +1379,7 @@ export default function App() {
                          <button 
                            onClick={(e) => {
                              e.stopPropagation();
-                             processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches);
+                             processAlbumPdf(albumImages, albumOrientation, albumPhotosPerPage, marginInches, autoRotateLandscape, albumPhotoScale, albumFitMode);
                            }}
                            disabled={isProcessing}
                            className="px-5 py-2 bg-pink-600 text-white text-xs font-semibold rounded-lg hover:bg-pink-700 transition-colors shadow-xs flex items-center gap-2"
